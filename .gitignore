@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+*.log
+.pytest_cache/
+.vscode/
+.idea/
+experiments/results/*.tmp
+experiments/results/k6_tmp.json
+infra/optimized.env

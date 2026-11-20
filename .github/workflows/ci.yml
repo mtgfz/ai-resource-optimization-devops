@@ -1,0 +1,45 @@
+name: CI-CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test-build-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r app/requirements-dev.txt
+
+      - name: Unit tests
+        run: pytest app/tests -v
+
+      - name: Build + deploy stack (measure deployment duration)
+        run: |
+          cd infra
+          start=$(date +%s)
+          docker compose up -d --build --wait
+          end=$(date +%s)
+          echo "deploy_duration_s=$((end-start))" | tee ../deploy_duration.txt
+
+      - name: Smoke test
+        run: |
+          curl -fsS http://localhost:8000/health
+          curl -fsS http://localhost:9090/-/ready
+
+      - name: Upload deployment duration
+        uses: actions/upload-artifact@v4
+        with:
+          name: deploy-duration
+          path: deploy_duration.txt
+
+      - name: Tear down
+        if: always()
+        run: cd infra && docker compose down -v

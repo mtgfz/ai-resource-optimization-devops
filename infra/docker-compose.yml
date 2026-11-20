@@ -1,0 +1,46 @@
+# BASELINE configuration = generous limits (over-provisioned on purpose).
+# The optimized configuration reuses this same file with another env file:
+#   docker compose --env-file baseline.env  up -d --wait   (baseline)
+#   docker compose --env-file optimized.env up -d --wait   (optimized)
+services:
+  app:
+    build: ../app
+    container_name: demo-app
+    ports: ["8000:8000"]
+    cpus: ${APP_CPUS:-1.0}
+    mem_limit: ${APP_MEM:-512m}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    container_name: cadvisor
+    ports: ["8080:8080"]
+    privileged: true
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: prometheus
+    ports: ["9090:9090"]
+    volumes:
+      - ../monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: grafana
+    ports: ["3000:3000"]
+    volumes:
+      - ../monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    restart: unless-stopped
