@@ -4,38 +4,88 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:        # lets you start the pipeline manually from the Actions tab
+
+concurrency:                # cancel an older run of the same branch when a new push arrives
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  test-build-deploy:
+  # ---------- STAGE 1: CI - check the code ----------
+  lint-test:
+    name: 1 - Lint and test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+          cache: pip                                   # re-use downloaded packages between runs
+          cache-dependency-path: app/requirements-dev.txt
 
       - name: Install dependencies
-        run: pip install -r app/requirements-dev.txt
+        run: pip install -r app/requirements-dev.txt ruff
+
+      - name: Lint (style and bug check)
+        run: ruff check app optimizer experiments
 
       - name: Unit tests
         run: pytest app/tests -v
 
-      - name: Build + deploy stack (measure deployment duration)
+  # ---------- STAGE 2: CI - build the container image ----------
+  build:
+    name: 2 - Build image
+    needs: lint-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build Docker image (measure build time)
+        run: |
+          start=$(date +%s)
+          docker build -t demo-app:ci app
+          end=$(date +%s)
+          echo "build_duration_s=$((end-start))" | tee build_duration.txt
+          echo "### Build" >> "$GITHUB_STEP_SUMMARY"
+          echo "Image build took **$((end-start)) s**" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Container smoke test
+        run: |
+          docker run -d --name t -p 8000:8000 demo-app:ci
+          for i in $(seq 1 15); do curl -fsS http://localhost:8000/health && break || sleep 2; done
+          curl -fsS http://localhost:8000/light
+          docker rm -f t
+
+  # ---------- STAGE 3: CD - deploy the full stack ----------
+  deploy:
+    name: 3 - Deploy stack
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Deploy with Docker Compose (measure deployment duration)
         run: |
           cd infra
           start=$(date +%s)
-          docker compose up -d --build --wait
+          docker compose --env-file baseline.env up -d --build --wait
           end=$(date +%s)
           echo "deploy_duration_s=$((end-start))" | tee ../deploy_duration.txt
+          echo "### Deployment" >> "$GITHUB_STEP_SUMMARY"
+          echo "Stack deployed in **$((end-start)) s**" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Smoke test
+      - name: Smoke test (app + monitoring)
         run: |
           curl -fsS http://localhost:8000/health
           curl -fsS http://localhost:9090/-/ready
 
+      - name: Show running containers
+        if: always()
+        run: docker compose -f infra/docker-compose.yml ps
+
       - name: Upload deployment duration
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: deploy-duration
           path: deploy_duration.txt
