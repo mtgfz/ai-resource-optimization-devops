@@ -4,49 +4,77 @@ on:
   push:
     branches: [main]
   pull_request:
-  workflow_dispatch:        # lets you start the pipeline manually from the Actions tab
+  workflow_dispatch:          # manual start from the Actions tab
 
-concurrency:                # cancel an older run of the same branch when a new push arrives
+concurrency:                  # a new push cancels the older run of the same branch
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
-  # ---------- STAGE 1: CI - check the code ----------
-  lint-test:
-    name: 1 - Lint and test
+  # ================= STAGE 1 : CODE QUALITY GATE =================
+  quality:
+    name: 1 - Quality gate (py${{ matrix.python }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12"]      # the code must work on both versions
     steps:
       - uses: actions/checkout@v6
 
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
-          cache: pip                                   # re-use downloaded packages between runs
-          cache-dependency-path: app/requirements-dev.txt
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: |
+            app/requirements-dev.txt
+            optimizer/requirements.txt
 
       - name: Install dependencies
-        run: pip install -r app/requirements-dev.txt ruff
+        run: pip install -r app/requirements-dev.txt requests numpy ruff
 
       - name: Lint (style and bug check)
         run: ruff check app optimizer experiments
 
-      - name: Unit tests
-        run: pytest app/tests -v
+      - name: Unit tests + coverage gate (minimum 90%)
+        run: >
+          pytest app/tests optimizer/tests
+          --cov=app --cov=optimizer --cov-report=term-missing --cov-fail-under=90
 
-  # ---------- STAGE 2: CI - build the container image ----------
-  build:
-    name: 2 - Build image
-    needs: lint-test
+  # ================= STAGE 2 : SECURITY SCAN OF DEPENDENCIES =================
+  security:
+    name: 2 - Dependency audit
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Audit Python packages against known vulnerabilities
+        run: |
+          pip install pip-audit
+          pip-audit -r app/requirements.txt -r optimizer/requirements.txt
+
+  # ================= STAGE 3 : BUILD + IMAGE SCAN =================
+  build:
+    name: 3 - Build and scan image
+    needs: [quality, security]
+    runs-on: ubuntu-latest
+    outputs:
+      build_s: ${{ steps.build.outputs.build_s }}
     steps:
       - uses: actions/checkout@v6
 
       - name: Build Docker image (measure build time)
+        id: build
         run: |
           start=$(date +%s)
           docker build -t demo-app:ci app
           end=$(date +%s)
-          echo "build_duration_s=$((end-start))" | tee build_duration.txt
+          echo "build_s=$((end-start))" >> "$GITHUB_OUTPUT"
           echo "### Build" >> "$GITHUB_STEP_SUMMARY"
           echo "Image build took **$((end-start)) s**" >> "$GITHUB_STEP_SUMMARY"
 
@@ -57,21 +85,33 @@ jobs:
           curl -fsS http://localhost:8000/light
           docker rm -f smoke-test
 
-  # ---------- STAGE 3: CD - deploy the full stack ----------
+      - name: Scan image for CRITICAL vulnerabilities (Trivy)
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:0.57.0 image --severity CRITICAL --ignore-unfixed \
+            --exit-code 1 --no-progress demo-app:ci
+
+  # ================= STAGE 4 : DEPLOY + PERFORMANCE GATE =================
   deploy:
-    name: 3 - Deploy stack
+    name: 4 - Deploy and performance gate
     needs: build
     runs-on: ubuntu-latest
+    outputs:
+      deploy_s: ${{ steps.deploy.outputs.deploy_s }}
+      p95_ms: ${{ steps.gate.outputs.p95_ms }}
+      rps: ${{ steps.gate.outputs.rps }}
     steps:
       - uses: actions/checkout@v6
 
       - name: Deploy with Docker Compose (measure deployment duration)
+        id: deploy
         run: |
           cd infra
           start=$(date +%s)
           docker compose --env-file baseline.env up -d --build --wait
           end=$(date +%s)
-          echo "deploy_duration_s=$((end-start))" | tee ../deploy_duration.txt
+          echo "deploy_s=$((end-start))" >> "$GITHUB_OUTPUT"
+          echo "deploy_duration_s=$((end-start))" > ../deploy_duration.txt
           echo "### Deployment" >> "$GITHUB_STEP_SUMMARY"
           echo "Stack deployed in **$((end-start)) s**" >> "$GITHUB_STEP_SUMMARY"
 
@@ -80,16 +120,130 @@ jobs:
           curl -fsS http://localhost:8000/health
           curl -fsS http://localhost:9090/-/ready
 
+      - name: Performance gate (k6 load test with thresholds)
+        id: gate
+        run: |
+          mkdir -p k6out && chmod 777 k6out
+          set +e
+          docker run --rm --network host \
+            -v "$PWD/loadtest:/scripts:ro" -v "$PWD/k6out:/out" \
+            grafana/k6:0.54.0 run --summary-export /out/summary.json /scripts/ci-gate.js
+          code=$?
+          set -e
+          if [ -f k6out/summary.json ]; then
+            python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          m = json.load(open("k6out/summary.json"))["metrics"]
+          print(f"p95_ms={m['http_req_duration']['p(95)']:.1f}")
+          print(f"rps={m['http_reqs']['rate']:.1f}")
+          PY
+          fi
+          exit $code
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Resource recommendations (advisory, does not block the pipeline)
+        continue-on-error: true
+        run: |
+          pip install requests numpy
+          python optimizer/optimizer.py --minutes 5
+
+      - name: Upload evidence (deployment duration, k6 summary, recommendations)
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: ci-evidence
+          if-no-files-found: ignore
+          path: |
+            deploy_duration.txt
+            k6out/summary.json
+            optimizer/recommendations.md
+
       - name: Show running containers
         if: always()
         run: docker compose -f infra/docker-compose.yml ps
 
-      - name: Upload deployment duration
-        uses: actions/upload-artifact@v6
-        with:
-          name: deploy-duration
-          path: deploy_duration.txt
-
       - name: Tear down
         if: always()
         run: cd infra && docker compose down -v
+
+  # ================= STAGE 5 : PUBLISH IMAGE (main branch only) =================
+  publish:
+    name: 5 - Publish image to GHCR
+    needs: deploy
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build, tag and push
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/demo-app"
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker build -t "$IMAGE:${GITHUB_SHA::7}" -t "$IMAGE:latest" app
+          docker push "$IMAGE:${GITHUB_SHA::7}"
+          docker push "$IMAGE:latest"
+          echo "Published **$IMAGE:${GITHUB_SHA::7}**" >> "$GITHUB_STEP_SUMMARY"
+
+  # ================= REPORT : summary + pull request comment =================
+  report:
+    name: Report
+    needs: [quality, security, build, deploy]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Download evidence
+        continue-on-error: true
+        uses: actions/download-artifact@v7
+        with:
+          name: ci-evidence
+          path: evidence
+
+      - name: Build report and comment on the pull request
+        uses: actions/github-script@v8
+        env:
+          QUALITY: ${{ needs.quality.result }}
+          SECURITY: ${{ needs.security.result }}
+          BUILD: ${{ needs.build.result }}
+          DEPLOY: ${{ needs.deploy.result }}
+          BUILD_S: ${{ needs.build.outputs.build_s }}
+          DEPLOY_S: ${{ needs.deploy.outputs.deploy_s }}
+          P95: ${{ needs.deploy.outputs.p95_ms }}
+          RPS: ${{ needs.deploy.outputs.rps }}
+        with:
+          script: |
+            const fs = require('fs');
+            const icon = (r) => ({success: '✅', failure: '❌', cancelled: '⚪', skipped: '⚪'}[r] || '❔');
+            const e = process.env;
+            let body = '<!-- ci-report -->\n## CI/CD report\n\n';
+            body += '| Stage | Result | Detail |\n|---|---|---|\n';
+            body += `| 1 Quality gate (lint, tests, coverage) | ${icon(e.QUALITY)} ${e.QUALITY} | |\n`;
+            body += `| 2 Dependency audit | ${icon(e.SECURITY)} ${e.SECURITY} | |\n`;
+            body += `| 3 Build and image scan | ${icon(e.BUILD)} ${e.BUILD} | build ${e.BUILD_S || '?'} s |\n`;
+            body += `| 4 Deploy and performance gate | ${icon(e.DEPLOY)} ${e.DEPLOY} | deploy ${e.DEPLOY_S || '?'} s, p95 ${e.P95 || '?'} ms, ${e.RPS || '?'} req/s |\n`;
+            const recPath = 'evidence/optimizer/recommendations.md';
+            if (fs.existsSync(recPath)) {
+              body += '\n### Resource recommendations (advisory)\n';
+              body += 'Produced by the optimizer from the CI load test. **A human decides whether to apply them.**\n\n';
+              body += fs.readFileSync(recPath, 'utf8').split('\n').slice(2).join('\n');
+            }
+            await core.summary.addRaw(body).write();
+            if (context.eventName !== 'pull_request') return;
+            const {owner, repo} = context.repo;
+            const issue_number = context.issue.number;
+            const {data: comments} = await github.rest.issues.listComments({owner, repo, issue_number});
+            const existing = comments.find(c => c.body && c.body.includes('<!-- ci-report -->'));
+            if (existing) {
+              await github.rest.issues.updateComment({owner, repo, comment_id: existing.id, body});
+            } else {
+              await github.rest.issues.createComment({owner, repo, issue_number, body});
+            }
