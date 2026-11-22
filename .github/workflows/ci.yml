@@ -124,12 +124,19 @@ jobs:
         id: gate
         run: |
           mkdir -p k6out && chmod 777 k6out
+          # sample the container's CPU and memory every second while the load runs
+          ( while true; do
+              docker stats --no-stream --format '{{.CPUPerc}};{{.MemUsage}}' demo-app >> k6out/docker-stats.txt
+              sleep 1
+            done ) &
+          SAMPLER=$!
           set +e
           docker run --rm --network host \
             -v "$PWD/loadtest:/scripts:ro" -v "$PWD/k6out:/out" \
             grafana/k6:0.54.0 run --summary-export /out/summary.json /scripts/ci-gate.js
           code=$?
           set -e
+          kill $SAMPLER 2>/dev/null || true
           if [ -f k6out/summary.json ]; then
             python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import json
@@ -140,15 +147,6 @@ jobs:
           fi
           exit $code
 
-      - name: Diagnose monitoring data (prints what Prometheus and cAdvisor expose)
-        if: always()
-        continue-on-error: true
-        run: |
-          echo "--- Prometheus targets ---"
-          curl -s http://localhost:9090/api/v1/targets | python3 -c "import sys,json; [print(t['labels'].get('job'), t['health'], t.get('lastError','')) for t in json.load(sys.stdin)['data']['activeTargets']]"
-          echo "--- cAdvisor series for CPU (id / name labels) ---"
-          curl -s 'http://localhost:9090/api/v1/query?query=container_cpu_usage_seconds_total' | python3 -c "import sys,json; r=json.load(sys.stdin)['data']['result']; print(len(r), 'series'); [print({k: v for k, v in s['metric'].items() if k in ('id', 'name', 'image')}) for s in r[:15]]"
-
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
@@ -157,8 +155,7 @@ jobs:
         continue-on-error: true
         run: |
           pip install requests numpy
-          CID=$(docker inspect -f '{{.Id}}' demo-app)
-          python optimizer/optimizer.py --minutes 5 --selector "id=~\".*${CID}.*\""
+          python optimizer/optimizer.py --docker-stats k6out/docker-stats.txt
 
       - name: Upload evidence (deployment duration, k6 summary, recommendations)
         if: always()
@@ -169,6 +166,7 @@ jobs:
           path: |
             deploy_duration.txt
             k6out/summary.json
+            k6out/docker-stats.txt
             optimizer/recommendations.md
 
       - name: Show running containers
