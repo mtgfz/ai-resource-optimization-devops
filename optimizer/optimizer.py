@@ -82,20 +82,25 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--prometheus", default="http://localhost:9090")
     ap.add_argument("--container", default="demo-app")
+    ap.add_argument("--selector", default=None,
+                    help='PromQL label selector, default: name="<container>". '
+                         'Example: id=~".*<container-id>.*" when cAdvisor has no name label')
     ap.add_argument("--minutes", type=int, default=30, help="analysis window")
     ap.add_argument("--margin", type=float, default=0.20, help="safety margin (0.20 = +20%%)")
     args = ap.parse_args()
 
     end = time.time()
     start = end - args.minutes * 60
+    selector = args.selector or f'name="{args.container}"'
     cpu = query_range(args.prometheus,
-                      f'rate(container_cpu_usage_seconds_total{{name="{args.container}"}}[30s])',
+                      f"rate(container_cpu_usage_seconds_total{{{selector}}}[15s])",
                       start, end)
     mem = query_range(args.prometheus,
-                      f'container_memory_working_set_bytes{{name="{args.container}"}}',
+                      f"container_memory_working_set_bytes{{{selector}}}",
                       start, end) / (1024 * 1024)
     if cpu.size == 0 or mem.size == 0:
-        raise SystemExit("No data returned by Prometheus. Run a workload first.")
+        raise SystemExit(f"No data returned by Prometheus for selector {{{selector}}}. "
+                         "Run a workload first, or pass --selector.")
 
     cpu_p95, mem_p95 = float(np.percentile(cpu, 95)), float(np.percentile(mem, 95))
     rec_cpu, rec_mem = recommend(cpu_p95, mem_p95, args.margin)
