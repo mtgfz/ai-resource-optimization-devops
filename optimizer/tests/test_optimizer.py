@@ -122,3 +122,38 @@ def test_main_default_selector_uses_container_name(fake_repo, monkeypatch):
     monkeypatch.setattr(sys, "argv", ["optimizer.py"])
     optimizer.main()
     assert all('name="demo-app"' in e for e in seen)
+
+
+# ---------- docker stats input (used by CI when cAdvisor cannot see the container) ----------
+def test_parse_size_mb_units():
+    assert optimizer.parse_size_mb("1MiB") == pytest.approx(1.0)
+    assert optimizer.parse_size_mb("1GiB") == pytest.approx(1024.0)
+    assert optimizer.parse_size_mb("1024KiB") == pytest.approx(1.0)
+    assert optimizer.parse_size_mb("1048576B") == pytest.approx(1.0)
+    with pytest.raises(ValueError):
+        optimizer.parse_size_mb("12 parsecs")
+
+
+def test_parse_docker_stats_converts_and_skips_bad_lines():
+    text = "50.00%;100MiB / 512MiB\n\ngarbage\n25.00%;2GiB / 4GiB\n"
+    cpu, mem = optimizer.parse_docker_stats(text)
+    assert list(cpu) == pytest.approx([0.5, 0.25])      # 100% = 1 core
+    assert list(mem) == pytest.approx([100.0, 2048.0])
+
+
+def test_main_from_docker_stats_file(fake_repo, monkeypatch):
+    stats = fake_repo / "stats.txt"
+    stats.write_text("\n".join(["20.00%;100MiB / 512MiB"] * 10))
+    monkeypatch.setattr(sys, "argv", ["optimizer.py", "--docker-stats", str(stats)])
+    optimizer.main()
+    env = (fake_repo / "infra" / "optimized.env").read_text()
+    assert "APP_CPUS=0.25" in env and "APP_MEM=128m" in env
+    assert "docker stats, 10 samples" in (fake_repo / "optimizer" / "recommendations.md").read_text()
+
+
+def test_main_empty_docker_stats_exits(fake_repo, monkeypatch):
+    stats = fake_repo / "stats.txt"
+    stats.write_text("")
+    monkeypatch.setattr(sys, "argv", ["optimizer.py", "--docker-stats", str(stats)])
+    with pytest.raises(SystemExit):
+        optimizer.main()
