@@ -152,7 +152,7 @@ jobs:
 
       - name: Upload evidence (deployment duration, k6 summary, recommendations)
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: ci-evidence
           if-no-files-found: ignore
