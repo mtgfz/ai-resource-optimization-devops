@@ -140,6 +140,15 @@ jobs:
           fi
           exit $code
 
+      - name: Diagnose monitoring data (prints what Prometheus and cAdvisor expose)
+        if: always()
+        continue-on-error: true
+        run: |
+          echo "--- Prometheus targets ---"
+          curl -s http://localhost:9090/api/v1/targets | python3 -c "import sys,json; [print(t['labels'].get('job'), t['health'], t.get('lastError','')) for t in json.load(sys.stdin)['data']['activeTargets']]"
+          echo "--- cAdvisor series for CPU (id / name labels) ---"
+          curl -s 'http://localhost:9090/api/v1/query?query=container_cpu_usage_seconds_total' | python3 -c "import sys,json; r=json.load(sys.stdin)['data']['result']; print(len(r), 'series'); [print({k: v for k, v in s['metric'].items() if k in ('id', 'name', 'image')}) for s in r[:15]]"
+
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
@@ -148,7 +157,8 @@ jobs:
         continue-on-error: true
         run: |
           pip install requests numpy
-          python optimizer/optimizer.py --minutes 5
+          CID=$(docker inspect -f '{{.Id}}' demo-app)
+          python optimizer/optimizer.py --minutes 5 --selector "id=~\".*${CID}.*\""
 
       - name: Upload evidence (deployment duration, k6 summary, recommendations)
         if: always()

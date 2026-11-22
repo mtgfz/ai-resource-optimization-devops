@@ -96,3 +96,29 @@ def test_main_without_data_exits(fake_repo, monkeypatch):
     monkeypatch.setattr(sys, "argv", ["optimizer.py"])
     with pytest.raises(SystemExit):
         optimizer.main()
+
+
+def test_main_uses_custom_selector(fake_repo, monkeypatch):
+    seen = []
+
+    def fake_query(prom, expr, start, end, step=5):
+        seen.append(expr)
+        return np.full(10, 0.2) if "cpu" in expr else np.full(10, 100 * 1024 * 1024.0)
+
+    monkeypatch.setattr(optimizer, "query_range", fake_query)
+    monkeypatch.setattr(sys, "argv", ["optimizer.py", "--selector", 'id=~".*abc.*"'])
+    optimizer.main()
+    assert all('id=~".*abc.*"' in e for e in seen)
+
+
+def test_main_default_selector_uses_container_name(fake_repo, monkeypatch):
+    seen = []
+
+    def fake_query(prom, expr, start, end, step=5):
+        seen.append(expr)
+        return np.full(10, 0.2) if "cpu" in expr else np.full(10, 100 * 1024 * 1024.0)
+
+    monkeypatch.setattr(optimizer, "query_range", fake_query)
+    monkeypatch.setattr(sys, "argv", ["optimizer.py"])
+    optimizer.main()
+    assert all('name="demo-app"' in e for e in seen)
