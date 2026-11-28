@@ -41,7 +41,7 @@ jobs:
 
       - name: Unit tests + coverage gate (minimum 90%)
         run: >
-          pytest app/tests optimizer/tests
+          pytest app/tests optimizer/tests experiments/tests
           --cov=app --cov=optimizer --cov-report=term-missing --cov-fail-under=90
 
   # ================= STAGE 2 : SECURITY SCAN OF DEPENDENCIES =================
