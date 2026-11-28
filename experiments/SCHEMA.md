@@ -13,5 +13,6 @@
 | throughput_rps | requests per second (k6) |
 | restarts | container restart count after the run (docker inspect) |
 | deploy_duration_s | time of `docker compose up -d --wait` |
+| metrics_source | where CPU/memory came from: `prometheus` or `docker-stats` (fallback when cAdvisor cannot see the container) |
 
 Rule: only real measurements are written here. Never edit values by hand.
