@@ -40,6 +40,7 @@ def health():
 
 @app.get("/light")
 def light():
+    time.sleep(1)
     return {"message": "hello", "ts": time.time()}
 
 
