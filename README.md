@@ -1,5 +1,5 @@
 # AI-Assisted Resource Optimization for Cloud-Native DevOps Infrastructure
-
+![CI-CD](https://github.com/mtgfz/ai-resource-optimization-devops/actions/workflows/ci.yml/badge.svg)
 Course: Virtualization and Cloud Infrastructure (ENSIAS) - Research Project
 Group 1: Doha Idrissi Azami, Mouna Admant, Basma Elgharbaoui, Fatima-Ezzahra Lemtougui
 
